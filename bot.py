@@ -1,8 +1,10 @@
+import psycopg2
 import os
 import re
 import sqlite3
 import discord
 import datetime
+from urllib.parse import urlparse
 
 # --- Discord setup ---
 intents = discord.Intents.default()
@@ -10,6 +12,7 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 # --- Database setup ---
+db_url = os.getenv("DATABASE_URL")
 conn = sqlite3.connect("bets.db")
 c = conn.cursor()
 c.execute("""
