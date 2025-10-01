@@ -1,10 +1,9 @@
-import psycopg2
 import os
 import re
-import sqlite3
+import psycopg2
+from urllib.parse import urlparse
 import discord
 import datetime
-from urllib.parse import urlparse
 
 # --- Discord setup ---
 intents = discord.Intents.default()
@@ -27,7 +26,6 @@ conn = psycopg2.connect(
 )
 c = conn.cursor()
 
-# Create table if not exists
 c.execute("""
 CREATE TABLE IF NOT EXISTS bets (
     id SERIAL PRIMARY KEY,
@@ -42,7 +40,7 @@ CREATE TABLE IF NOT EXISTS bets (
 conn.commit()
 
 # --- Config ---
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))  # set in Railway env vars
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 # --- Helpers ---
@@ -71,7 +69,7 @@ def parse_bet(text: str):
 async def log_bet(message, parsed):
     units, odds, status, result = parsed
     c.execute(
-        "INSERT INTO bets (bet_text, units, odds, status, result, date) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO bets (bet_text, units, odds, status, result, date) VALUES (%s, %s, %s, %s, %s, %s)",
         (message.content.strip(), units, odds, status, result, message.created_at.date())
     )
     conn.commit()
@@ -88,7 +86,7 @@ async def on_ready():
             parsed = parse_bet(message.content)
             if parsed:
                 # Avoid double logging if already in DB
-                c.execute("SELECT 1 FROM bets WHERE bet_text=? AND date=?", 
+                c.execute("SELECT 1 FROM bets WHERE bet_text=%s AND date=%s",
                           (message.content.strip(), message.created_at.date()))
                 if not c.fetchone():
                     await log_bet(message, parsed)
@@ -103,7 +101,7 @@ async def on_message(message):
     if parsed:
         await log_bet(message, parsed)
 
-    # Optional: simple command for all-time record
+    # Simple command for all-time record
     if message.content.strip().lower() == "!record":
         c.execute("SELECT COUNT(*), SUM(result) FROM bets")
         total, pnl = c.fetchone()
