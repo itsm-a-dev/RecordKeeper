@@ -1,3 +1,225 @@
+# bot.py — multi-server, admin-guarded, bet-type-aware CLV with automation (Tue/Fri 3am) and interactive fixes
+
+import os
+import re
+import asyncio
+import datetime
+import discord
+import psycopg2
+import traceback
+from urllib.parse import urlparse
+
+# --- Discord setup ---
+intents = discord.Intents.default()
+intents.message_content = True
+client = discord.Client(intents=intents)
+
+# --- Database setup ---
+db_url = os.getenv("DATABASE_URL")
+if not db_url:
+    raise RuntimeError("DATABASE_URL not set in environment variables")
+
+url = urlparse(db_url)
+conn = psycopg2.connect(
+    dbname=url.path[1:],
+    user=url.username,
+    password=url.password,
+    host=url.hostname,
+    port=url.port
+)
+conn.autocommit = False
+
+def exec_safe(sql, params=None, fetch="none"):
+    """Execute SQL safely and return results if requested."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params or [])
+            if fetch == "one":
+                return cur.fetchone()
+            elif fetch == "all":
+                return cur.fetchall()
+            else:
+                return None
+    except psycopg2.Error:
+        conn.rollback()
+        raise
+
+# --- Schema bootstrap ---
+exec_safe("""
+CREATE TABLE IF NOT EXISTS bets (
+    id SERIAL PRIMARY KEY,
+    bet_text TEXT,
+    units REAL,
+    odds TEXT,
+    status TEXT,
+    result REAL,
+    date DATE
+)
+""")
+exec_safe("ALTER TABLE bets ADD COLUMN IF NOT EXISTS guild_id BIGINT")
+exec_safe("ALTER TABLE bets ADD COLUMN IF NOT EXISTS sport TEXT")
+exec_safe("ALTER TABLE bets ADD COLUMN IF NOT EXISTS bet_type TEXT")
+exec_safe("ALTER TABLE bets ADD COLUMN IF NOT EXISTS posted_line REAL")
+exec_safe("ALTER TABLE bets ADD COLUMN IF NOT EXISTS posted_side TEXT")
+exec_safe("ALTER TABLE bets ADD COLUMN IF NOT EXISTS closing_line REAL")
+exec_safe("ALTER TABLE bets ADD COLUMN IF NOT EXISTS closing_odds TEXT")
+
+exec_safe("""
+CREATE TABLE IF NOT EXISTS settings (
+    guild_id BIGINT PRIMARY KEY,
+    channel_id BIGINT,
+    override_date DATE
+)
+""")
+
+exec_safe("""
+CREATE TABLE IF NOT EXISTS closings (
+    id SERIAL PRIMARY KEY,
+    guild_id BIGINT,
+    event_key TEXT,
+    closing_line REAL,
+    closing_odds TEXT,
+    source TEXT,
+    fetched_at TIMESTAMP
+)
+""")
+
+exec_safe("""
+CREATE TABLE IF NOT EXISTS clv_fixes (
+    id SERIAL PRIMARY KEY,
+    bet_id INT REFERENCES bets(id) ON DELETE CASCADE,
+    guild_id BIGINT,
+    candidates TEXT[],
+    created_at TIMESTAMP DEFAULT NOW(),
+    resolved BOOLEAN DEFAULT FALSE
+)
+""")
+conn.commit()
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+# --- Settings helpers ---
+def get_channel_id(guild_id):
+    row = exec_safe("SELECT channel_id FROM settings WHERE guild_id=%s", (guild_id,), fetch="one")
+    return row[0] if row and row[0] else None
+
+def get_override_date(guild_id):
+    row = exec_safe("SELECT override_date FROM settings WHERE guild_id=%s", (guild_id,), fetch="one")
+    return row[0] if row and row[0] else None
+
+def clear_override_date(guild_id):
+    exec_safe("UPDATE settings SET override_date=NULL WHERE guild_id=%s", (guild_id,))
+    conn.commit()
+
+# --- Emoji sentiment ---
+def classify_line(line: str, units: float):
+    lower = line.lower()
+    if any(w in lower for w in ["✅", "🏆", "🔥", "cash", "hit", "win", " w "]):
+        return "win", units
+    if any(w in lower for w in ["❌", "💀", "loss", "miss", " l ", "lose", "🪝", "🎣"]):
+        return "loss", -units
+    if any(w in lower for w in ["push", "void", "cancel"]):
+        return "push", 0.0
+    return None, 0.0
+
+# --- Date extraction ---
+def extract_date_from_text(text: str):
+    m = re.search(r"\b(\d{1,2})/(\d{1,2})\b", text)
+    if not m:
+        return None
+    month, day = int(m.group(1)), int(m.group(2))
+    year = datetime.date.today().year
+    try:
+        return datetime.date(year, month, day)
+    except ValueError:
+        return None
+
+# --- Sport detection ---
+SPORT_MAP = {
+    "soccer": "soccer", "mls": "soccer", "ucl": "soccer", "⚽": "soccer",
+    "football": "football", "nfl": "football", "cfb": "football", "🏈": "football",
+    "basketball": "basketball", "nba": "basketball", "wnba": "basketball", "cbb": "basketball", "🏀": "basketball",
+    "baseball": "baseball", "mlb": "baseball", "⚾": "baseball",
+    "mma": "mma", "ufc": "mma", "🥊": "mma",
+    "hockey": "hockey", "nhl": "hockey", "🏒": "hockey",
+}
+
+def extract_sport(text: str):
+    lower = text.lower()
+    for key, sport in SPORT_MAP.items():
+        if key in lower:
+            return sport
+    return None
+
+# --- Bet type + line extraction ---
+GENERIC_WORDS = {
+    "over", "under", "parlay", "moneyline", "ml", "spread", "total",
+    "pts", "points", "reb", "rebounds", "ast", "assists"
+}
+
+def detect_bet_type_and_line(text: str):
+    lower = text.lower()
+    tm = re.search(r"\b(over|under|o/u)\b\s*([0-9]+(?:\.[0-9]+)?)", lower)
+    if tm:
+        side_raw = tm.group(1)
+        side = "over" if "over" in side_raw else "under"
+        line_val = float(tm.group(2))
+        if re.search(r"\b(pts|points|reb|rebounds|ast|assists|sog|shots|yards|yds|ga|saves)\b", lower):
+            return "prop", line_val, side
+        return "total", line_val, side
+    sm = re.search(r"(^|[^0-9])([+-]\d+(?:\.\d+)?)\b", text)
+    if sm:
+        raw = sm.group(2)
+        line_val = float(raw)
+        side = "fav" if raw.startswith("-") else "dog"
+        return "spread", line_val, side
+    if "ml" in lower or "moneyline" in lower:
+        return "moneyline", None, None
+    if re.search(r"[+-]\d{3,4}", text):
+        return "moneyline", None, None
+    return "unknown", None, None
+
+def extract_teams_key(bet_text: str):
+    tokens = re.findall(r"[A-Za-z][A-Za-z&.\- ]{2,}", bet_text)
+    teams = []
+    for t in tokens:
+        t_clean = t.strip().lower()
+        if len(t_clean) > 2 and t_clean not in GENERIC_WORDS:
+            teams.append(t_clean)
+    teams_key = "|".join(sorted(set(teams)))[:180] or "unknown"
+    return teams_key
+
+def build_event_key(bet_text: str, sport: str, date: datetime.date, bet_type: str):
+    return f"{(sport or 'unknown')}|{date.isoformat()}|{(bet_type or 'unknown')}|{extract_teams_key(bet_text)}"
+
+# --- CLV math ---
+def american_to_prob(odds: str):
+    try:
+        o = int(odds)
+        if o > 0:
+            return 100 / (o + 100)
+        return -o / (-o + 100)
+    except Exception:
+        return None
+
+def calc_clv_for_bet(bet_type, posted_line, posted_side, posted_odds, closing_line, closing_odds):
+    if bet_type == "moneyline":
+        p_post = american_to_prob(posted_odds) if posted_odds else None
+        p_close = american_to_prob(closing_odds) if closing_odds else None
+        if p_post is None or p_close is None:
+            return None
+        return p_close - p_post
+    if bet_type == "spread":
+        if posted_line is None or closing_line is None or posted_side not in {"fav", "dog"}:
+            return None
+        return abs(closing_line) - abs(posted_line)
+    if bet_type in {"total", "prop"}:
+        if posted_line is None or closing_line is None or posted_side not in {"over", "under"}:
+            return None
+        diff = closing_line - posted_line
+        return diff if posted_side == "over" else -diff
+    return None
+
 # --- Closings cache helpers ---
 def cache_get_closing(guild_id, event_key):
     row = exec_safe("""
@@ -162,6 +384,18 @@ async def on_message(message):
     guild_id = message.guild.id
     cmd = message.content.strip().lower()
 
+    if cmd == "!updateclv":
+        if not message.author.guild_permissions.administrator:
+            await message.channel.send("🚫 Only administrators can update CLV.")
+            return
+        try:
+            updated = await run_updateclv_for_guild(guild_id)
+            await message.channel.send(f"🔄 CLV update complete. Filled {updated} bets. Unmatched queued for !fixclv.")
+        except Exception as e:
+            traceback.print_exc()
+            await message.channel.send(f"❌ CLV update failed: {e}")
+        return
+
     if cmd == "!fixclv":
         if not message.author.guild_permissions.administrator:
             await message.channel.send("🚫 Only administrators can fix CLV.")
@@ -295,7 +529,6 @@ async def on_message(message):
         except Exception:
             await message.channel.send("Usage: `!recap YYYY-MM-DD`")
         return
-
     if cmd == "!clv":
         rows = exec_safe("""
             SELECT bet_type, posted_line, posted_side, odds, closing_line, closing_odds
@@ -307,10 +540,12 @@ async def on_message(message):
         agg, total_sum, total_cnt = {}, 0.0, 0
         for bt, pl, ps, o, cl, co in rows:
             val = calc_clv_for_bet(bt, pl, ps, o, cl, co)
-            if val is None: continue
+            if val is None: 
+                continue
             key = bt or "unknown"
             a = agg.get(key, {"sum": 0.0, "cnt": 0})
-            a["sum"] += val; a["cnt"] += 1
+            a["sum"] += val
+            a["cnt"] += 1
             agg[key] = a
         if not agg:
             await message.channel.send("No valid CLV calculations yet.")
@@ -319,7 +554,8 @@ async def on_message(message):
         for key, a in agg.items():
             avg = a["sum"] / a["cnt"]
             lines.append(f"- {key}: Avg CLV {avg:+.3f}")
-            total_sum += a["sum"]; total_cnt += a["cnt"]
+            total_sum += a["sum"]
+            total_cnt += a["cnt"]
         overall = total_sum / total_cnt if total_cnt else 0.0
         lines.append(f"\nOverall avg: {overall:+.3f}")
         await message.channel.send("\n".join(lines))
@@ -354,9 +590,3 @@ if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN not set in environment variables")
     client.run(TOKEN)
-
-    ch_id = get_channel_id(guild_id)
-    if ch_id and message.channel.id == ch_id:
-        override = get_override_date(guild_id)
-        bet_date = override or extract_date_from_text(message.content) or message.created_at.date()
-        lines = message.content
