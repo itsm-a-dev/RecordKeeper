@@ -31,25 +31,29 @@ conn = psycopg2.connect(
 )
 c = conn.cursor()
 
-# Ensure tables exist (bet-type aware + CLV fields)
+# Ensure tables exist and add missing columns
 c.execute("""
 CREATE TABLE IF NOT EXISTS bets (
     id SERIAL PRIMARY KEY,
     bet_text TEXT,
     units REAL,
-    odds TEXT,              -- posted odds (American, e.g. -110) for ML or juice
-    status TEXT,            -- win/loss/push
-    result REAL,            -- +units / -units / 0
-    date DATE,
-    guild_id BIGINT,
-    sport TEXT,             -- parsed sport tag/emoji keyword
-    bet_type TEXT,          -- moneyline | spread | total | prop | unknown
-    posted_line REAL,       -- numeric line for spread/total/prop (e.g., -3.5, 27.5)
-    posted_side TEXT,       -- 'fav'/'dog' for spreads, 'over'/'under' for totals/props
-    closing_line REAL,      -- numeric closing line for spread/total/prop
-    closing_odds TEXT       -- closing juice/odds for ML or totals/props
+    odds TEXT,
+    status TEXT,
+    result REAL,
+    date DATE
 )
 """)
+
+# Add new columns if they don't already exist
+c.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS guild_id BIGINT")
+c.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS sport TEXT")
+c.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS bet_type TEXT")
+c.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS posted_line REAL")
+c.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS posted_side TEXT")
+c.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS closing_line REAL")
+c.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS closing_odds TEXT")
+
+# Settings table
 c.execute("""
 CREATE TABLE IF NOT EXISTS settings (
     guild_id BIGINT PRIMARY KEY,
@@ -57,18 +61,20 @@ CREATE TABLE IF NOT EXISTS settings (
     override_date DATE
 )
 """)
-# Cache table for closing odds/lines per event to avoid repeated external calls/imports
+
+# Closings cache
 c.execute("""
 CREATE TABLE IF NOT EXISTS closings (
     id SERIAL PRIMARY KEY,
     guild_id BIGINT,
-    event_key TEXT,         -- stable key: sport|date|bet_type|teams_key
+    event_key TEXT,
     closing_line REAL,
     closing_odds TEXT,
     source TEXT,
     fetched_at TIMESTAMP
 )
 """)
+
 conn.commit()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
