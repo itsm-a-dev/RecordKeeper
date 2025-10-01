@@ -13,11 +13,13 @@ client = discord.Client(intents=intents)
 
 # --- Database setup ---
 db_url = os.getenv("DATABASE_URL")
-conn = sqlite3.connect("bets.db")
+conn = psycopg2.connect(db_url)
 c = conn.cursor()
+
+# Create table if not exists
 c.execute("""
 CREATE TABLE IF NOT EXISTS bets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     bet_text TEXT,
     units REAL,
     odds TEXT,
