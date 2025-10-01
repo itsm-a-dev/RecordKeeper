@@ -13,7 +13,19 @@ client = discord.Client(intents=intents)
 
 # --- Database setup ---
 db_url = os.getenv("DATABASE_URL")
-conn = psycopg2.connect(db_url)
+if not db_url:
+    raise RuntimeError("DATABASE_URL not set in environment variables")
+
+urlparse.uses_netloc.append("postgres")
+url = urlparse.urlparse(db_url)
+
+conn = psycopg2.connect(
+    database=url.path[1:],  # strip leading '/'
+    user=url.username,
+    password=url.password,
+    host=url.hostname,
+    port=url.port
+)
 c = conn.cursor()
 
 # Create table if not exists
