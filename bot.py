@@ -6,6 +6,7 @@ import asyncio
 import datetime
 import discord
 import psycopg2
+import traceback
 from urllib.parse import urlparse
 
 # --- Discord setup ---
