@@ -463,8 +463,8 @@ async def on_message(message):
             updated = await run_updateclv_for_guild(guild_id)
             await message.channel.send(f"🔄 CLV update complete. Filled {updated} bets. Unmatched queued for !fixclv.")
         except Exception as e:
-            await message.channel.send("❌ CLV update failed.")
-        return
+            traceback.print_exc()
+            await message.channel.send(f"❌ CLV update failed: {e}")
 
     # Admin-only: interactive fix mode
     if cmd.strip().lower() == "!fixclv":
