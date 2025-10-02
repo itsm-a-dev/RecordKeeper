@@ -1,4 +1,3 @@
-# odds_api.py
 import os, requests
 from db import exec_safe, conn
 
