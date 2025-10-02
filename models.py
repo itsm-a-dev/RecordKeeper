@@ -1,4 +1,3 @@
-# models.py
 from db import exec_safe, conn
 
 def bootstrap_schema():
@@ -50,15 +49,22 @@ def bootstrap_schema():
     """)
     conn.commit()
 
-# --- Settings helpers ---
 def get_channel_id(guild_id):
     row = exec_safe("SELECT channel_id FROM settings WHERE guild_id=%s", (guild_id,), fetch="one")
     return row[0] if row and row[0] else None
 
-def get_override_date(guild_id):
-    row = exec_safe("SELECT override_date FROM settings WHERE guild_id=%s", (guild_id,), fetch="one")
-    return row[0] if row and row[0] else None
+def set_channel_id(guild_id, channel_id):
+    exec_safe("""
+        INSERT INTO settings (guild_id, channel_id)
+        VALUES (%s, %s)
+        ON CONFLICT (guild_id) DO UPDATE SET channel_id=EXCLUDED.channel_id
+    """, (guild_id, channel_id))
+    conn.commit()
 
-def clear_override_date(guild_id):
-    exec_safe("UPDATE settings SET override_date=NULL WHERE guild_id=%s", (guild_id,))
+def set_override_date(guild_id, date):
+    exec_safe("""
+        INSERT INTO settings (guild_id, override_date)
+        VALUES (%s, %s)
+        ON CONFLICT (guild_id) DO UPDATE SET override_date=EXCLUDED.override_date
+    """, (guild_id, date))
     conn.commit()
