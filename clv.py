@@ -1,11 +1,9 @@
-# clv.py
 import datetime, asyncio
 from db import exec_safe, conn
 from models import get_channel_id
 from odds_api import fetch_and_store_closings
 
 def try_update_bet_with_closing(bet_id, guild_id, bet_text, sport, bet_type, date):
-    # simplified: build event_key and try to match closings
     event_key = f"{sport}|{date.isoformat()}|{bet_type}|{bet_text[:50]}"
     rows = exec_safe("SELECT closing_line, closing_odds FROM closings WHERE guild_id=%s AND event_key=%s",
                      (guild_id, event_key), fetch="all")
