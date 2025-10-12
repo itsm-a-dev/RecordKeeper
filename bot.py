@@ -1,35 +1,49 @@
 # bot.py
-import os, discord
-from models import bootstrap_schema
-from clv import clv_scheduler, run_updateclv_for_guild
-from odds_api import fetch_and_store_closings
+import os
+import logging
+import asyncio
+
+import discord
+from discord.ext import commands
+
+from utils.db import init_db, db_pool  # pool will be assigned after init
+# cogs will be loaded dynamically
+
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
+if not DISCORD_TOKEN:
+    raise RuntimeError("DISCORD_TOKEN must be set in environment")
+
+logging.basicConfig(level=LOG_LEVEL)
+logger = logging.getLogger("recap-bot")
 
 intents = discord.Intents.default()
-intents.message_content = True
-client = discord.Client(intents=intents)
+intents.messages = True
+intents.guilds = True
+intents.message_content = True  # required if you need message content in newer bots (depends on privileges)
 
-bootstrap_schema()
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
-@client.event
+@bot.event
 async def on_ready():
-    print(f"Logged in as {client.user}")
-    client.loop.create_task(clv_scheduler(client))
+    logger.info(f"Bot ready. Logged in as {bot.user} (id={bot.user.id})")
+    # Initialize DB
+    await init_db()
+    # Load cogs
+    try:
+        await bot.load_extension("cogs.recap")
+        await bot.load_extension("cogs.stats")
+        await bot.load_extension("cogs.reports")
+        await bot.load_extension("cogs.admin")
+    except Exception as e:
+        logger.exception("Error loading cogs: %s", e)
 
-@client.event
-async def on_message(message):
-    if message.author.bot: return
-    cmd = message.content.strip().lower()
-    if cmd == "!ping":
-        await message.channel.send("pong")
-    if cmd == "!updateclv":
-        updated = await run_updateclv_for_guild(message.guild.id)
-        await message.channel.send(f"🔄 CLV update complete. Filled {updated} bets.")
-    if cmd.startswith("!fetchclosings"):
-        sport = cmd.split(" ",1)[1] if " " in cmd else "nba"
-        count = fetch_and_store_closings(message.guild.id, sport)
-        await message.channel.send(f"📊 Inserted {count} closings for {sport.upper()}.")
+    # Sync app commands (slash commands)
+    try:
+        await bot.tree.sync()
+        logger.info("Synced application commands (slash commands).")
+    except Exception as e:
+        logger.exception("Failed to sync app commands: %s", e)
 
-TOKEN = os.getenv("DISCORD_TOKEN")
-if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN not set")
-client.run(TOKEN)
+if __name__ == "__main__":
+    bot.run(DISCORD_TOKEN)
